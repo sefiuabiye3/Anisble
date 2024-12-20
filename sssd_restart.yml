@@ -1,0 +1,38 @@
+---
+- name: Restart SSSD and clear credentials cache
+  hosts: all
+  pre_tasks:
+    - name: Include variables from vault
+      ansible.builtin.include_vars: "./Vars/vault.yaml"
+
+  tasks:
+    - name: Stop SSSD
+      ansible.builtin.systemd:
+        name: "sssd.service"
+        state: stopped
+
+    - name: Find SSSD credentials cache
+      ansible.builtin.find:
+        paths: "/var/lib/sss/db"
+        patterns: "*"
+      register: cache_files
+
+    - name: Clear SSSD credentials cache
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      with_items: "{{ cache_files.files }}"
+
+    - name: Start SSSD
+      ansible.builtin.systemd:
+        name: "sssd.service"
+        state: started
+
+    - name: Retrieve test user from AD
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ acct_RHEL_AD_user }}"
+
+    - name: Display test user information
+      ansible.builtin.debug:
+        msg: "Test User: {{ getent_passwd }}"
