@@ -1,0 +1,41 @@
+---
+# defaults file for roles/create_multiple_user.yml
+
+users:
+  - username: 
+    name: ""
+    shell: "/bin/bash"
+    groups: "wheel"
+    uid: 6000
+    ssh_public_keys: files/
+  - username:
+    name: ""
+    shell: "/bin/bash"
+    groups: "wheel"
+    uid: 6001
+    ssh_public_keys: files/
+  - username: 
+    name: ""
+    shell: "/bin/bash"
+    groups: "wheel"
+    uid: 6002
+    ssh_public_keys: 
+  - username: 
+    name: ""
+    shell: "/bin/bash"
+    groups: "wheel"
+    uid: 6003
+    ssh_public_keys: files/
+  - username: 
+    name: ""
+    shell: "/bin/bash"
+    groups: "wheel"
+    uid: 6004
+    ssh_public_keys: files/
+  - username: 
+    name: ""
+    shell: "/bin/bash"
+    groups: "wheel"
+    uid: 6005
+    ssh_public_keys: files/
+
