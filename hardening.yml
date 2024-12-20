@@ -1,0 +1,580 @@
+# System hardening playbook
+# - Based on openscap recommendations and remediation examples
+
+---
+- name: System Hardening
+  hosts: all
+  become: yes
+  vars:
+    auditd_template: "../Includes/auditd_critical_server.rules"
+
+  tasks:
+    - name: XCCDF Value sshd_approved_macs # promote to variable
+      ansible.builtin.set_fact:
+        sshd_approved_macs: !!str hmac-sha2-512,hmac-sha2-256,hmac-sha1,hmac-sha1-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com
+      tags:
+        - always
+
+    - name: Use Only FIPS 140-2 Validated MACs
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+      block:
+        - name: Deduplicate values from /etc/ssh/sshd_config
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            create: false
+            regexp: (?i)^\s*MACs\s+
+            state: absent
+            owner: root
+            group: root
+            mode: '600'
+
+        - name: Insert correct line to /etc/ssh/sshd_config
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            create: true
+            line: MACs {{ sshd_approved_macs }}
+            state: present
+            insertbefore: ^[#\s]*Match
+            validate: /usr/sbin/sshd -t -f %s
+            owner: root
+            group: root
+            mode: '600'
+
+    - name: XCCDF Value sshd_approved_ciphers # promote to variable
+      ansible.builtin.set_fact:
+        sshd_approved_ciphers: !!str aes128-ctr,aes192-ctr,aes256-ctr,aes128-cbc,3des-cbc,aes192-cbc,aes256-cbc
+
+    - name: Use Only FIPS 140-2 Validated Ciphers
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+      block:
+        - name: Deduplicate values from /etc/ssh/sshd_config
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            create: false
+            regexp: (?i)^\s*Ciphers\s+
+            state: absent
+            owner: root
+            group: root
+            mode: '600'
+
+        - name: Insert correct line to /etc/ssh/sshd_config
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            create: true
+            line: Ciphers {{ sshd_approved_ciphers }}
+            state: present
+            insertbefore: ^[#\s]*Match
+            validate: /usr/sbin/sshd -t -f %s
+            owner: root
+            group: root
+            mode: '600'
+
+    - name: Allow Only SSH Protocol 2
+      ansible.builtin.lineinfile:
+        dest: "/etc/ssh/sshd_config"
+        regexp: "^Protocol"
+        insertafter: "^X11Forwarding"
+        line: "Protocol 2"
+        owner: root
+        group: root
+        mode: '600'
+
+    - name: Disable SSH Access via Empty Passwords
+      ansible.builtin.lineinfile:
+        dest: "/etc/ssh/sshd_config"
+        regexp: "^PermitEmptyPasswords"
+        insertafter: "^X11Forwarding"
+        line: "PermitEmptyPasswords no"
+        owner: root
+        group: root
+        mode: '600'
+
+  # Special characters in /etc/issue are not processed correctly on SSH
+  #  - name: Set SSH Banner to /etc/issue
+  #    ansible.builtin.lineinfile:
+  #      dest: "/etc/ssh/sshd_config"
+  #      regexp: "^Banner"
+  #      insertafter: "^X11Forwarding"
+  #      line: "Banner /etc/issue"
+
+    - name: Restrict SSH Environment Options
+      ansible.builtin.lineinfile:
+        dest: "/etc/ssh/sshd_config"
+        regexp: "^PermitUserEnvironment"
+        insertafter: "^X11Forwarding"
+        line: "PermitUserEnvironment no"
+        owner: root
+        group: root
+        mode: '600'
+
+    - name: Restart service sshd
+      ansible.builtin.systemd:
+        name: sshd.service
+        state: restarted
+
+    - name: Disable GSSAPI Authentication
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+      block:
+        - name: Deduplicate values from /etc/ssh/sshd_config
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            create: false
+            regexp: (?i)^\s*GSSAPIAuthentication\s+
+            state: absent
+            owner: root
+            group: root
+            mode: '600'
+
+        - name: Insert correct line to /etc/ssh/sshd_config
+          ansible.builtin.lineinfile:
+            path: /etc/ssh/sshd_config
+            create: true
+            line: GSSAPIAuthentication no
+            state: present
+            insertbefore: ^[#\s]*Match
+            validate: /usr/sbin/sshd -t -f %s
+            owner: root
+            group: root
+            mode: '600'
+
+    - name: Disable service kdump
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+      block:
+        - name: Gather the service facts
+          ansible.builtin.service_facts: null
+
+        - name: Disable service kdump
+          ansible.builtin.systemd:
+            name: kdump.service
+            enabled: 'no'
+            state: stopped
+            masked: 'yes'
+          when: '"kdump.service" in ansible_facts.services'
+
+    - name: Unit Socket Exists - kdump.socket
+      ansible.builtin.command: systemctl list-unit-files kdump.socket
+        #      args:
+        #        warn: false
+      register: socket_file_exists
+      changed_when: false
+      ignore_errors: true
+      check_mode: false
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: Disable socket kdump
+      ansible.builtin.systemd:
+        name: kdump.socket
+        enabled: 'no'
+        state: stopped
+        masked: 'yes'
+      when:
+        - '"kdump.socket" in socket_file_exists.stdout_lines[1]'
+        - ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: Ensure kernel module 'cramfs' is disabled
+      ansible.builtin.lineinfile:
+        create: true
+        dest: /etc/modprobe.d/cramfs.conf
+        regexp: cramfs
+        line: install cramfs /bin/true
+        owner: root
+        group: root
+        mode: '644'
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: XCCDF Value sysctl_net_ipv6_conf_default_accept_source_route_value # promote to variable
+      ansible.builtin.set_fact:
+        sysctl_net_ipv6_conf_default_accept_source_route_value: !!str 0
+
+    - name: Ensure sysctl net.ipv6.conf.default.accept_source_route is set
+      ansible.posix.sysctl:
+        name: net.ipv6.conf.default.accept_source_route
+        value: '{{ sysctl_net_ipv6_conf_default_accept_source_route_value }}'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: XCCDF Value sysctl_net_ipv6_conf_all_accept_source_route_value # promote to variable
+      ansible.builtin.set_fact:
+        sysctl_net_ipv6_conf_all_accept_source_route_value: !!str 0
+
+    - name: Ensure sysctl net.ipv6.conf.all.accept_source_route is set
+      ansible.posix.sysctl:
+        name: net.ipv6.conf.all.accept_source_route
+        value: '{{ sysctl_net_ipv6_conf_all_accept_source_route_value }}'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: XCCDF Value sysctl_net_ipv6_conf_all_accept_redirects_value # promote to variable
+      ansible.builtin.set_fact:
+        sysctl_net_ipv6_conf_all_accept_redirects_value: !!str 0
+
+    - name: Ensure sysctl net.ipv6.conf.all.accept_redirects is set
+      ansible.posix.sysctl:
+        name: net.ipv6.conf.all.accept_redirects
+        value: '{{ sysctl_net_ipv6_conf_all_accept_redirects_value }}'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: XCCDF Value sysctl_net_ipv6_conf_default_accept_ra_value # promote to variable
+      ansible.builtin.set_fact:
+        sysctl_net_ipv6_conf_default_accept_ra_value: !!str 0
+
+    - name: Ensure sysctl net.ipv6.conf.default.accept_ra is set
+      ansible.posix.sysctl:
+        name: net.ipv6.conf.default.accept_ra
+        value: '{{ sysctl_net_ipv6_conf_default_accept_ra_value }}'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: XCCDF Value sysctl_net_ipv6_conf_all_accept_ra_value # promote to variable
+      ansible.builtin.set_fact:
+        sysctl_net_ipv6_conf_all_accept_ra_value: !!str 0
+
+    - name: Ensure sysctl net.ipv6.conf.all.accept_ra is set
+      ansible.posix.sysctl:
+        name: net.ipv6.conf.all.accept_ra
+        value: '{{ sysctl_net_ipv6_conf_all_accept_ra_value }}'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: XCCDF Value sysctl_net_ipv6_conf_default_accept_redirects_value # promote to variable
+      ansible.builtin.set_fact:
+        sysctl_net_ipv6_conf_default_accept_redirects_value: !!str 0
+
+    - name: Ensure sysctl net.ipv6.conf.default.accept_redirects is set
+      ansible.posix.sysctl:
+        name: net.ipv6.conf.default.accept_redirects
+        value: '{{ sysctl_net_ipv6_conf_default_accept_redirects_value }}'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: XCCDF Value sysctl_net_ipv4_conf_default_accept_redirects_value # promote to variable
+      ansible.builtin.set_fact:
+        sysctl_net_ipv4_conf_default_accept_redirects_value: !!str 0
+
+    - name: Ensure sysctl net.ipv4.conf.default.accept_redirects is set
+      ansible.posix.sysctl:
+        name: net.ipv4.conf.default.accept_redirects
+        value: '{{ sysctl_net_ipv4_conf_default_accept_redirects_value }}'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: XCCDF Value sysctl_net_ipv4_icmp_ignore_bogus_error_responses_value # promote to variable
+      ansible.builtin.set_fact:
+        sysctl_net_ipv4_icmp_ignore_bogus_error_responses_value: !!str 1
+
+    - name: Ensure sysctl net.ipv4.icmp_ignore_bogus_error_responses is set
+      ansible.posix.sysctl:
+        name: net.ipv4.icmp_ignore_bogus_error_responses
+        value: '{{ sysctl_net_ipv4_icmp_ignore_bogus_error_responses_value }}'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: XCCDF Value sysctl_net_ipv4_conf_all_secure_redirects_value # promote to variable
+      ansible.builtin.set_fact:
+        sysctl_net_ipv4_conf_all_secure_redirects_value: !!str 0
+
+    - name: Ensure sysctl net.ipv4.conf.all.secure_redirects is set
+      ansible.posix.sysctl:
+        name: net.ipv4.conf.all.secure_redirects
+        value: '{{ sysctl_net_ipv4_conf_all_secure_redirects_value }}'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: XCCDF Value sysctl_net_ipv4_tcp_syncookies_value # promote to variable
+      ansible.builtin.set_fact:
+        sysctl_net_ipv4_tcp_syncookies_value: !!str 1
+
+    - name: Ensure sysctl net.ipv4.tcp_syncookies is set
+      ansible.posix.sysctl:
+        name: net.ipv4.tcp_syncookies
+        value: '{{ sysctl_net_ipv4_tcp_syncookies_value }}'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: XCCDF Value sysctl_net_ipv4_conf_all_accept_redirects_value # promote to variable
+      ansible.builtin.set_fact:
+        sysctl_net_ipv4_conf_all_accept_redirects_value: !!str 0
+
+    - name: Ensure sysctl net.ipv4.conf.all.accept_redirects is set
+      ansible.posix.sysctl:
+        name: net.ipv4.conf.all.accept_redirects
+        value: '{{ sysctl_net_ipv4_conf_all_accept_redirects_value }}'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: XCCDF Value sysctl_net_ipv4_conf_all_log_martians_value # promote to variable
+      ansible.builtin.set_fact:
+        sysctl_net_ipv4_conf_all_log_martians_value: !!str 1
+
+    - name: Ensure sysctl net.ipv4.conf.all.log_martians is set
+      ansible.posix.sysctl:
+        name: net.ipv4.conf.all.log_martians
+        value: '{{ sysctl_net_ipv4_conf_all_log_martians_value }}'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: XCCDF Value sysctl_net_ipv4_conf_default_secure_redirects_value # promote to variable
+      ansible.builtin.set_fact:
+        sysctl_net_ipv4_conf_default_secure_redirects_value: !!str 0
+
+    - name: Ensure sysctl net.ipv4.conf.default.secure_redirects is set
+      ansible.posix.sysctl:
+        name: net.ipv4.conf.default.secure_redirects
+        value: '{{ sysctl_net_ipv4_conf_default_secure_redirects_value }}'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: XCCDF Value sysctl_net_ipv4_conf_default_log_martians_value # promote to variable
+      ansible.builtin.set_fact:
+        sysctl_net_ipv4_conf_default_log_martians_value: !!str 1
+
+    - name: Ensure sysctl net.ipv4.conf.default.log_martians is set
+      ansible.posix.sysctl:
+        name: net.ipv4.conf.default.log_martians
+        value: '{{ sysctl_net_ipv4_conf_default_log_martians_value }}'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+  #  - name: Check if Docker is installed
+  #    ansible.builtin.command:
+  #      cmd: rpm -q docker
+  #    register: docker_chk
+  #    failed_when: docker_chk.rc > 2
+
+    - name: Ensure sysctl net.ipv4.ip_forward is set to 1 to allow Docker
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+        reload: true
+  #    when: docker_chk.rc != 0
+
+  #  - name: Ensure sysctl net.ipv4.ip_forward is set to 1 for hosts running Docker
+  #    ansible.posix.sysctl:
+  #      name: net.ipv4.ip_forward
+  #      value: '1'
+  #      state: present
+  #      reload: true
+  #    when: docker_chk.rc == 0
+
+    - name: Ensure sysctl net.ipv4.conf.all.send_redirects is set to 0
+      ansible.posix.sysctl:
+        name: net.ipv4.conf.all.send_redirects
+        value: '0'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: Ensure kernel module 'dccp' is disabled
+      ansible.builtin.lineinfile:
+        create: true
+        dest: /etc/modprobe.d/dccp.conf
+        regexp: dccp
+        line: install dccp /bin/true
+        owner: root
+        group: root
+        mode: '644'
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: Ensure kernel module 'sctp' is disabled
+      ansible.builtin.lineinfile:
+        create: true
+        dest: /etc/modprobe.d/sctp.conf
+        regexp: sctp
+        line: install sctp /bin/true
+        owner: root
+        group: root
+        mode: '644'
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: Disable core dumps with limits
+      ansible.builtin.lineinfile:
+        dest: /etc/security/limits.conf
+        regexp: ^[^#].*core
+        line: '*        hard       core      0'
+        create: true
+        owner: root
+        group: root
+        mode: '644'
+
+    - name: Ensure sysctl kernel.kexec_load_disabled is set to 1
+      ansible.posix.sysctl:
+        name: kernel.kexec_load_disabled
+        value: '1'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: Ensure sysctl kernel.yama.ptrace_scope is set to 1
+      ansible.posix.sysctl:
+        name: kernel.yama.ptrace_scope
+        value: '1'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: Ensure sysctl kernel.dmesg_restrict is set to 1
+      ansible.posix.sysctl:
+        name: kernel.dmesg_restrict
+        value: '1'
+        state: present
+        reload: true
+      when: ansible_virtualization_role != "guest" or ansible_virtualization_type != "docker"
+
+    - name: Prevent login by accounts with empty passwords
+      ansible.builtin.replace:
+        dest: /etc/pam.d/system-auth
+        regexp: 'nullok\s*'
+        replace: ''
+
+    - name: "Disable unnecessary kernel modules"
+      ansible.builtin.lineinfile:
+        create: yes
+        dest: "/etc/modprobe.d/{{ item }}.conf"
+        regexp: "{{ item }}"
+        line: "install {{ item }} /bin/true"
+        owner: root
+        group: root
+        mode: '644'
+      with_items:
+        - freevxfs
+        - jffs2
+        - hfs
+        - hfsplus
+        - squashfs
+        - udf
+        - bluetooth
+
+    - name: "Read list of world and group writable system executables"
+      ansible.builtin.command: "find /bin /usr/bin /usr/local/bin /sbin /usr/sbin /usr/local/sbin /usr/libexec -perm /022 -type f"
+      register: world_writable_library_files
+      changed_when: False
+      failed_when: False
+      check_mode: no
+
+    - name: "Remove world/group writability of system executables"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: "go-w"
+      with_items: "{{ world_writable_library_files.stdout_lines }}"
+      when: world_writable_library_files.stdout_lines | length > 0
+
+    - name: "Read list of system executables without root ownership"
+      ansible.builtin.command: "find /bin/ /usr/bin/ /usr/local/bin/ /sbin/ /usr/sbin/ /usr/local/sbin/ /usr/libexec \\! -user root"
+      register: no_root_system_executables
+      changed_when: False
+      failed_when: False
+      check_mode: no
+
+    - name: "Set ownership to root of system executables"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: "root"
+      with_items: "{{ no_root_system_executables.stdout_lines }}"
+      when: no_root_system_executables.stdout_lines | length > 0
+
+        #    - name: Download template auditd rules
+        #      ansible.builtin.copy:
+        #        src: "{{ auditd_template }}"
+        #        dest: /etc/audit/rules.d/hl_audit.rules
+        #        owner: root
+        #        group: root
+        #        mode: '600'
+        #      become: yes
+
+  #  - name: "Read list of files with incorrect permissions"
+  #    shell: "rpm -Va | grep '^.M' | sed -r 's;^.*\\s+(.+);\\1;g'"
+  #    register: files_with_incorrect_permissions
+  #    failed_when: False
+  #    changed_when: False
+  #    check_mode: no
+
+  #  - name: "Correct file permissions with RPM"
+  #    ansible.builtin.command: "rpm --setperms $(rpm -qf '{{item}}')"
+  #    with_items: "{{ files_with_incorrect_permissions.stdout_lines }}"
+  #    when: files_with_incorrect_permissions.stdout_lines | length > 0
+
+    - name: "Ensure gpgcheck Enabled for Local Packages"
+      ansible.builtin.lineinfile:
+        dest: "/etc/yum.conf"
+        regexp: "^localpkg_gpgcheck"
+        line: "localpkg_gpgcheck=1"
+        owner: root
+        group: root
+        mode: '644'
+
+  # Not compatible with Red Hat Satellite
+  #  - name: "Ensure gpgcheck Enabled for Repository Metadata"
+  #    ansible.builtin.lineinfile:
+  #      dest: "/etc/yum.conf"
+  #      regexp: "^repo_gpgcheck"
+  #      line: "repo_gpgcheck=1"
+
+    - name: Restrict permissions on grub.cfg
+      ansible.builtin.file:
+        dest: /boot/grub2/grub.cfg
+        mode: '600'
+      become: yes
+
+    - name: "Disable Zeroconf Networking"
+      ansible.builtin.lineinfile:
+        dest: "/etc/sysconfig/network"
+        regexp: "^NOZEROCONF"
+        line: "NOZEROCONF=yes"
+        owner: root
+        group: root
+        mode: '644'
+
+    - name: "Disable IPv6 RPC Support for UDP"
+      ansible.builtin.lineinfile:
+        dest: "/etc/netconfig"
+        regexp: "^udp6"
+        line: "#udp6       tpi_clts      v     inet6    udp     -       -"
+        owner: root
+        group: root
+        mode: '644'
+
+    - name: "Disable IPv6 RPC Support for TCP"
+      ansible.builtin.lineinfile:
+        dest: "/etc/netconfig"
+        regexp: "^tcp6"
+        line: "#tcp6       tpi_cots_ord  v     inet6    tcp     -       -"
+        owner: root
+        group: root
+        mode: '644'
+
+    - name: "Set umask value"
+      ansible.builtin.lineinfile:
+        dest: "/etc/bashrc"
+        regexp: "^       umask 022"
+        line: "       umask 027"
+        owner: root
+        group: root
+        mode: '644'
+
+    # - name: Find accounts using /bin/false as shell
+    #   ansible.builtin.shell: |
+    #     cat /etc/passwd | grep "/bin/false" | cut -d':' -f1
+    #   register: false_shell
+    #   changed_when: false
+
+    # - name: Set accounts to use /sbin/nologin
+    #   ansible.builtin.user:
+    #     name: "{{ item }}"
+    #     shell: /sbin/nologin
+    #   loop: "{{ false_shell.stdout_lines }}"
