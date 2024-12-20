@@ -1,0 +1,30 @@
+---
+
+
+#- name: Define YUM cache directory for RHEL 7
+#  ansible.builtin.set_fact:
+#    yum_cache: "/var/cache/yum"
+
+#- name: Define DNF cache directory for RHEL 8
+#  ansible.builtin.set_fact:
+#    yum_cache: "/var/cache/dnf"
+#  when: ansible_distribution_major_version == '8' or ansible_distribution_major_version == '9'
+
+- name: Get disk space before
+  ansible.builtin.shell: "du -sh /var/cache/{yum,dnf} 2>/dev/null | cut -f1"
+  changed_when: false
+  register: disk_before
+
+- name: Run yum clean all
+  ansible.builtin.command: "{{ ansible_pkg_mgr }} clean all"
+  become: true
+  changed_when: true
+
+- name: Get disk space after
+  ansible.builtin.shell: "du -sh /var/cache/{yum,dnf} 2>/dev/null | cut -f1"
+  changed_when: false
+  register: disk_after
+
+- name: Display Disk Space Difference
+  ansible.builtin.debug:
+    msg: "Before: {{ disk_before.stdout }}  After: {{ disk_after.stdout }}"
