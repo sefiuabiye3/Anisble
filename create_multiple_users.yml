@@ -1,0 +1,6 @@
+---
+- name: Creating multiple users on managed hosts
+  hosts: all
+  
+  roles:
+    - install_users
