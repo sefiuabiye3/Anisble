@@ -1,0 +1,195 @@
+# This playbook should be run as root.
+---
+- name: Re-register to domain
+  hosts: all
+  vars:
+    ansible_python_interpreter: "/usr/libexec/platform-python"
+    sssd_template: "../Includes/sssd.conf"
+    domain_name: ""
+    domain_name_dmz: ""
+    svc_acct: "{{ acct_RHEL_AD_user }}"
+    svc_pass: "{{ acct_RHEL_AD_pass }}"
+    computer_ou: "OU=RHEL,OU=,DC=,DC="
+    computer_ou_dmz: "OU=RHEL,OU=NunComputers,DC=,DC="
+    dns_server: 
+    dns_server_dmz:
+    admin_grp_dmz: "CN=,OU=,DC=,DC="
+    reregister: "no"
+    dmz_host: "no"
+
+  pre_tasks:
+    - name: Include variables from vault
+      ansible.builtin.include_vars: "../Vars/vault.yaml"
+
+  tasks:
+    - name: Set variables properly for hosts in the DMZ
+      ansible.builtin.set_fact:
+        dmz_host: "yes"
+        domain_name: "{{ domain_name_dmz }}"
+        computer_ou: "{{ computer_ou_dmz }}"
+        svc_acct: "{{ acct_RHEL_AD_DMZ_user }}"
+        svc_pass: "{{ acct_RHEL_AD_DMZ_pass }}"
+        dns_server: "{{ dns_server_dmz }}"
+      when: ansible_default_ipv4.address | ansible.utils.ipaddr("192.168.1.0/24")
+
+    - name: Install HL Chain Certs
+      ansible.builtin.package:
+        name: "{{ packages }}"
+        state: present
+      become: true
+      vars:
+        packages:
+          - HL-CA-CHAIN
+          - oddjob
+          - oddjob-mkhomedir
+          - psacct
+          - realmd
+          - samba-common-tools
+          - sssd
+          - krb5-workstation
+
+    - name: Check if AD lookup works
+      ansible.builtin.command: id "{{ svc_acct }}"
+      register: domain_lookup
+      failed_when: domain_lookup.rc == 2
+      changed_when: domain_lookup.rc != 0
+
+    - name: Check DNS resolution
+      ansible.builtin.command: host {{ ansible_facts['fqdn'] }} {{ dns_server }}
+      register: dns_lookup
+      failed_when: dns_lookup.rc == 2
+      changed_when: dns_lookup.rc != 0
+
+    - name: Display status, join OK
+      ansible.builtin.debug:
+        msg: "{{ ansible_facts['fqdn'] }} - AD lookup OK, DNS lookup OK."
+      when: domain_lookup.rc == 0 and
+            dns_lookup.rc == 0
+
+    - name: Display status, AD lookup failed
+      ansible.builtin.debug:
+        msg: "{{ ansible_facts['fqdn'] }} - AD account lookup failed."
+      when: domain_lookup.rc != 0
+
+    - name: Display status, DNS lookup failed
+      ansible.builtin.debug:
+        msg: "{{ ansible_facts['fqdn'] }} - DNS lookup failed."
+      when: dns_lookup.rc != 0
+
+    - name: Leave Domain
+      ansible.builtin.command: realm leave
+      register: realm_leave
+      when: domain_lookup.rc != 0 or
+            dns_lookup.rc != 0 or
+            reregister == "yes"
+      failed_when: realm_leave.rc > 10
+      changed_when: true
+      become: true
+
+    - name: Domain to be joined
+      ansible.builtin.debug:
+        msg: "Joining domain: {{ domain_name }}, adding host to {{ computer_ou }}"
+
+    - name: Join Domain
+      ansible.builtin.shell: "echo \"{{ svc_pass }}\" | realm join {{ domain_name }} -U {{ svc_acct }} --computer-ou=\"{{ computer_ou }}\""
+      become: true
+      register: realm_join
+      failed_when: realm_join.rc > 1
+      when: domain_lookup.rc != 0 or
+            dns_lookup.rc != 0 or
+            reregister == "yes"
+      changed_when: true
+
+    - name: Download template sssd.conf
+      ansible.builtin.copy:
+        src: "{{ sssd_template }}"
+        dest: /etc/sssd/sssd.conf
+        mode: '0600'
+      become: true
+      when: domain_lookup.rc != 0 or
+            dns_lookup.rc != 0 or
+            reregister == "yes"
+
+    - name: Correct hostname in sssd.conf
+      ansible.builtin.replace:
+        path: /etc/sssd/sssd.conf
+        regexp: "NXHOSTNAME.hobbylobby.corp"
+        replace: "{{ ansible_facts['nodename'] }}"
+      become: true
+      when: domain_lookup.rc != 0 or
+            dns_lookup.rc != 0 or
+            reregister == "yes"
+
+#    - name: Correct domain name in sssd.conf
+#      replace:
+#        path: /etc/sssd/sssd.conf
+#        regexp: "(?i)hobbylobby.corp"
+#        replace: "{{ domain_name }}"
+
+    - name: Correct default_domain_suffix in sssd.conf
+      ansible.builtin.lineinfile:
+        path: /etc/sssd/sssd.conf
+        regexp: "^default_domain_suffix"
+        line: "default_domain_suffix = {{ domain_name }}"
+      become: true
+
+    - name: Correct domains list in sssd.conf
+      ansible.builtin.lineinfile:
+        path: /etc/sssd/sssd.conf
+        regexp: "^domains"
+        line: "domains = {{ domain_name }}"
+      become: true
+
+    - name: Correct domain section name in sssd.conf
+      ansible.builtin.lineinfile:
+        path: /etc/sssd/sssd.conf
+        regexp: "domain/HobbyLobby"
+        line: "[domain/{{ domain_name }}]"
+      become: true
+#      when: dmz_host == "yes"
+
+    - name: Correct ad_domain in sssd.conf
+      ansible.builtin.lineinfile:
+        path: /etc/sssd/sssd.conf
+        regexp: "^ad_domain"
+        line: "ad_domain = {{ domain_name }}"
+      become: true
+
+    - name: Correct krb5_realm in sssd.conf
+      ansible.builtin.lineinfile:
+        path: /etc/sssd/sssd.conf
+        regexp: "^krb5_realm"
+        line: "krb5_realm = {{ domain_name | upper }}"
+      become: true
+
+    - name: Correct access filter in sssd.conf form DMZ domain
+      ansible.builtin.lineinfile:
+        path: /etc/sssd/sssd.conf
+        regexp: "^ad_access_filter"
+        line: "ad_access_filter = (memberOf={{ admin_grp_dmz }})"
+      become: true
+      when: ansible_default_ipv4.address | ansible.utils.ipaddr("192.168.1.0/24")
+
+    - name: Make sure SSSD is running
+      ansible.builtin.systemd:
+        state: started
+        name: sssd
+      become: true
+      when: domain_lookup.rc != 0 or
+            dns_lookup.rc != 0 or
+            reregister == "yes"
+
+    - name: Add sudoers file for RHEL Admins
+      ansible.builtin.lineinfile:
+        path: /etc/sudoers.d/sg_rhel_admins
+        regex: "^%sg_rhel_admins"
+        line: "%sg_rhel_admins@{{ domain_name }} ALL=(ALL) ALL"
+        create: true
+        mode: '0644'
+        owner: root
+        group: root
+        state: present
+      become: true
+
+- name: Configure authorization through SSSD
+  import_playbook: ./set_security.yaml
