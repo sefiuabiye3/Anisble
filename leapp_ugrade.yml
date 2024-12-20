@@ -1,0 +1,380 @@
+---
+- name: Leapp analysis and upgrade
+  hosts: all
+#  strategy: free # noqa: run-once[play]
+  gather_facts: true
+#  become: true
+  force_handlers: true
+
+  vars:
+    upgrade_target: "{{ '8.8' if ansible_distribution_major_version == '7' else '9.2' if ansible_distribution_version == '8.8' else '9.4' }}"
+    _upgrade_target: "{{ '--target ' ~ upgrade_target if upgrade_target | length > 0 else '' }}"
+    post_upgrade_unset_release: false
+    #post_upgrade_release: "{{ '' if post_upgrade_unset_release else upgrade_target }}"
+    post_upgrade_update: false
+    infra_leapp_upgrade_system_roles_collection: "redhat.rhel_system_roles"
+    leapp_preupg_opts: "{{ _upgrade_target }} --no-insights-register"
+    leapp_upgrade_opts: "{{ _upgrade_target }} --no-insights-register"
+    leapp_answerfile: |
+      [remove_pam_pkcs11_module_check]
+      confirm = True
+      [authselect_check]
+      confirm = True
+#    update_grup_to_grub2: true
+#    selinux_mode: permissive
+    os_path: $PATH
+    services:
+      - jenkins.service
+      - nexus.service
+      - Splunkd.service
+      - nexposeengine.service
+      - dsmc.service
+      - vsftpd.service
+    _start_services: "{{ (start_services | default(false)) | bool }}"
+    _stop_services: "{{ (stop_services | default(true)) | bool }}"
+  pre_tasks:
+    - name: Abort on RHEL 9 hosts
+      ansible.builtin.meta: end_host
+      when: ansible_distribution_major_version == "9"
+      tags:
+        - analysis
+        - upgrade
+
+    - name: Remove unwanted packages
+      ansible.builtin.package:
+        name: chef
+        state: absent
+      tags:
+        - analysis
+        - upgrade
+
+    - name: Install leapp prerequisites
+      ansible.builtin.package:
+        name:
+          - vdo
+          - firewalld
+        state: present
+      when: ansible_distribution_major_version == "8"
+      tags:
+        - analysis
+        - upgrade
+
+    - name: Temporarily set crypto-policy to LEGACY
+      ansible.builtin.command:
+        cmd: update-crypto-policies --set LEGACY
+      tags:
+        - analysis
+        - upgrade
+      changed_when: true
+      when: ansible_distribution_major_version == "8"
+
+    - name: Remove unsupported drivers
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: absent
+      loop:
+        - floppy
+        - pata_acpi
+      tags:
+        - analysis
+        - upgrade
+      when: ansible_distribution_major_version == "7"
+
+    - name: Get service facts
+      ansible.builtin.service_facts:
+      when: services is defined
+      check_mode: false
+      tags:
+        - services
+
+    - name: Stop and Disable Service(s)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop: "{{ services }}"
+      when:
+        - services is defined
+        - item in ansible_facts.services
+        - _stop_services
+      tags:
+        - services
+
+    - name: Stop Dynatrace
+      tags:
+        - services
+        - analysis
+        - upgrade
+      when:
+        - _stop_services
+      block:
+        - name: Stat Dynatrace
+          ansible.builtin.stat:
+            path: /opt/dynatrace-managed/launcher/dynatrace.sh
+          register: dynatrace
+          failed_when: dynatrace.stat.exists
+
+      rescue:
+        - name: Stop Dynatrace
+          ansible.builtin.shell:
+            cmd: /opt/dynatrace-managed/launcher/dynatrace.sh stop
+
+    - name: Unmount NFS directories
+      ansible.posix.mount:
+        path: "{{ item.mount }}"
+        state: unmounted
+      loop: "{{ ansible_mounts }}"
+      loop_control:
+        label: "{{ item.mount }}"
+      when:
+        - item.fstype in ["nfs", "nfs4"]
+      tags:
+        - analysis
+        - upgrade
+        - nfs
+
+#    - name: Unmount NFS Home share
+#      ansible.posix.mount:
+#        path: /home
+#        state: unmounted
+#      tags:
+#        - analysis
+#        - upgrade
+
+    - name: Disable NFS Home Mount in fstab
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^hlisi01nfs'
+        replace: '#hlisi01nfs'
+      notify: daemon-reload
+      tags:
+        - analysis
+        - upgrade
+        - nfs
+
+    - name: Disable NFS Backup Mount in fstab
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^hlddbackup1'
+        replace: '#hlddbackup1'
+      notify: daemon-reload
+      tags:
+        - analysis
+        - upgrade
+        - nfs
+
+    - name: Unset Release Target
+      community.general.rhsm_release:
+#        release: "{{ upgrade_target }}"
+        release: null
+      when: ansible_distribution_major_version == "7"
+      tags:
+        - analysis
+        - upgrade
+
+#  roles:
+#    - name: infra.leapp.analysis
+#      tags:
+#        - analysis
+#    - name: infra.leapp.upgrade
+#      tags:
+#        - upgrade
+
+  tasks:
+    - name: Generate preupgrade analysis report
+      ansible.builtin.include_role:
+        name: infra.leapp.analysis
+        apply:
+          tags:
+            - analysis
+      tags:
+        - analysis
+
+    - name: Flush Analysis Handlers
+      ansible.builtin.meta: flush_handlers
+      tags:
+        - analysis
+
+    - name: Perform OS upgrade
+      ansible.builtin.include_role:
+        name: infra.leapp.upgrade
+        apply:
+          tags:
+            - upgrade
+      tags:
+        - upgrade
+
+    - name: Flush Upgrade Handlers
+      ansible.builtin.meta: flush_handlers
+      tags:
+        - upgrade
+
+    - name: Enable NFS Home Mount in fstab
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^#hlisi01nfs'
+        replace: 'hlisi01nfs'
+      tags:
+        - analysis
+        - upgrade
+        - nfs
+      notify: daemon-reload
+
+    - name: Enable NFS Backup Mount in fstab
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^#hlddbackup1'
+        replace: 'hlddbackup1'
+      tags:
+        - analysis
+        - upgrade
+        - nfs
+      notify: daemon-reload
+
+  post_tasks:
+    - name: Re-mount fstab
+      ansible.builtin.command:
+        cmd: mount -a
+      tags:
+        - analysis
+        - upgrade
+        - nfs
+      changed_when: true
+
+    - name: Start and Enable Service(s)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop: "{{ services }}"
+      when:
+        - services is defined
+        - item in ansible_facts.services
+        - _start_services
+      tags:
+        - services
+
+    - name: Start Dynatrace
+      tags:
+        - services
+        - analysis
+        - upgrade
+      when:
+        - _start_services
+      block:
+        - name: Stat Dynatrace
+          ansible.builtin.stat:
+            path: /opt/dynatrace-managed/launcher/dynatrace.sh
+          register: dynatrace
+          failed_when: dynatrace.stat.exists
+
+      rescue:
+        - name: Stop Dynatrace
+          ansible.builtin.shell:
+            cmd: /opt/dynatrace-managed/launcher/dynatrace.sh start
+
+
+  handlers:
+    - name: daemon-reload
+      ansible.builtin.systemd: # noqa name[casing]
+        daemon_reload: true
+      tags:
+        - always
+
+- name: Install Katello Host tools and tracer
+  hosts: all
+  tasks:
+    - name: Unset target release
+      community.general.rhsm_release:
+        release: null
+      when: unset_release is defined
+      tags:
+        - katello
+
+    - name: Subscription Manager Refresh
+      ansible.builtin.command: subscription-manager refresh
+      changed_when: false
+      tags:
+        - katello
+
+    - name: Remove Katello-Agent
+      ansible.builtin.package:
+        name: katello-agent
+        state: removed
+      tags:
+        - katello
+
+    - name: Install host-tracers
+      ansible.builtin.package:
+        name:
+          - katello-host-tools
+          - katello-host-tools-tracer
+        state: present
+      tags:
+        - katello
+
+    - name: Install standard packages
+      ansible.builtin.package:
+        name: "{{ packages }}"
+        state: present
+      tags:
+        - katello
+      vars:
+        packages:
+          - cifs-utils
+          - cockpit
+          - bash-completion
+          - bind-utils
+          - git
+          - iptables-services
+          - kexec-tools
+          - nano
+          - net-tools
+          - nfs-utils
+          - oddjob
+          - oddjob-mkhomedir
+          - open-vm-tools
+          - psacct
+          - realmd
+          - samba-common-tools
+          - sssd
+          - sos
+          - vim-enhanced
+          - wget
+
+    - name: Upgrade minor release
+      ansible.builtin.package: # noqa: package-latest
+        name: "*"
+        state: latest
+      when: unset_release is defined
+      notify: Reboot
+      tags:
+        - katello
+
+    - name: Reset crypto-policy to DEFAULT
+      ansible.builtin.command:
+        cmd: update-crypto-policies --set DEFAULT
+      tags:
+        - katello
+      changed_when: true
+      when: ansible_distribution_major_version == "9"
+      notify: Reboot
+
+  handlers:
+    - name: Reboot
+      ansible.builtin.reboot:
+        post_reboot_delay: 15
+        reboot_timeout: 600
+      tags:
+        - katello
+
+  post_tasks:
+    - name: Run tracers
+      ansible.builtin.shell:
+        cmd: |
+          katello-enabled-repos-upload;
+          katello-package-upload;
+          katello-tracer-upload
+      tags:
+        - katello
+      changed_when: false
