@@ -1,0 +1,38 @@
+---
+- name: Patch hosts
+  hosts: all
+  become: yes
+  vars:
+    yum_skip_broken: "no"
+    ansible_python_interpreter: "/usr/libexec/platform-python"
+
+  tasks:
+    - name: YUM update
+      ansible.builtin.package: # noqa: package-latest
+        name: '*'
+        state: latest
+        skip_broken: "{{ yum_skip_broken }}"
+      environment:
+        ACCEPT_EULA: 'y'
+
+    - name: Check if reboot is required
+      ansible.builtin.command: needs-restarting -r
+      failed_when: false
+      register: reboot_required
+      changed_when: reboot_required.rc != 0
+      notify: Host restart
+
+  handlers:
+    - name: Host restart
+      ansible.builtin.reboot:
+        post_reboot_delay: 15
+        reboot_timeout: 600
+      when:
+        - ("Manual_Reboot" not in groups) or (inventory_hostname not in groups['Manual_Reboot'])
+        - ("hostcollection_manual_reboot" not in groups) or (inventory_hostname not in groups['hostcollection_manual_reboot'])
+        - ("App_Owner_Reboot" not in groups) or (inventory_hostname not in groups['App_Owner_Reboot'])
+        - ("hostcollection_app_owner_reboot" not in groups) or (inventory_hostname not in groups['hostcollection_app_owner_reboot'])
+
+  post_tasks:
+    - name: Yum Clean Up
+      ansible.builtin.include_tasks: ./Tasks/yum_clean.yaml
