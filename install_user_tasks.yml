@@ -1,0 +1,78 @@
+---
+# tasks file for roles/create_multiple_user.yml
+
+- name: Create users and add to wheel group
+  ansible.builtin.user:
+    name: "{{ item.username }}"
+    comment: "{{ item.name }}"
+    shell: "{{ item.shell }}"
+    uid: "{{ item.uid }}"
+    groups: "wheel"
+    state: present
+  loop: "{{ users }}"
+
+- name: Create .ssh directory for each users
+  ansible.builtin.file:
+    path: "/home/{{ item.username }}/.ssh"
+    state: directory
+    owner: "{{ item.username }}"
+    group: "{{ item.username }}"
+    mode: '0700'
+  loop: "{{ users }}"
+
+- name: Add public keys to managed hosts
+  ansible.builtin.copy:
+    src: "{{ item.ssh_public_keys }}" 
+    dest: "/home/{{ item.username }}/.ssh/id_rsa.pub"
+    owner: "{{ item.username }}"
+    group: "{{ item.username }}"
+    mode: '0600'
+  loop: "{{ users }}"
+
+- name: Add authorized keys to managed hosts
+  ansible.builtin.copy:
+    src: "{{ item.ssh_public_keys }}"
+    dest: "/home/{{ item.username }}/.ssh/authorized_keys"
+    owner: "{{ item.username }}"
+    group: "{{ item.username }}"
+    mode: '0600'
+  loop: "{{ users }}"
+
+- name: Ensure home directory ownership and files
+  ansible.builtin.file:
+    path: "/home/{{ item.username }}"
+    state: directory
+    owner: "{{ item.username }}"
+    group: "{{ item.username }}"
+  loop: "{{ users }}"
+
+- name: Create veeambackup on mananged hosts
+  ansible.builtin.user:
+    name: veeambackup
+    uid: 1000
+
+- name: Adding a sudo configuration file
+  ansible.builtin.template:
+    src: "/etc/ansible/HKC_Ansible/Templates/veeambackup.sudo"
+    dest: /etc/sudoers.d/veeambackup
+    owner: root
+    group: root
+    mode: '0640'
+
+- name: Ensure the wheel group has passwordless sudo access
+  ansible.builtin.lineinfile:
+    path: /etc/sudoers
+    state: present
+    regexp: '^%wheel'
+    line: '%wheel  ALL=(ALL) NOPASSWD: ALL'
+    validate: 'visudo -cf %s'
+        
+- name: Verify users in wheel group
+  ansible.builtin.command:
+    cmd: "getent group wheel"
+  register: wheel_group_users
+
+- name: Display users in wheel group
+  ansible.builtin.debug:
+    msg: "Users in wheel group: {{ wheel_group_users.stdout_lines }}"
+  
