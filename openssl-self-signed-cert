@@ -1,0 +1,90 @@
+name: Configure OpenSSL, Apache (httpd), and HTTP to HTTPS Redirect
+  hosts: 172.16.1.166
+  roles:
+    - generate_ssl
+vars:
+ssl_country: "US"
+ssl_state: "MD"
+ssl_city: "Bowie"
+ssl_org: "Leidos"
+ssl_org_unit: "Linux Admin"
+ssl_common_name: "{{ inventory_hostname }}"
+ssl_email: "afolabi.mojibola@ulab.local"
+ssl_valid_days: 365
+ssl_dir: "/etc/pki/tls/custom"
+ssl_key_path: "{{ ssl_dir }}/{{ inventory_hostname }}.key"
+ssl_csr_path: "{{ ssl_dir }}/{{ inventory_hostname }}.csr"
+ssl_cert_path: "{{ ssl_dir }}/{{ inventory_hostname }}.crt"
+apache_conf_dir: "/etc/httpd/conf.d"
+apache_ssl_conf: "{{ apache_conf_dir }}/{{ inventory_hostname }}-ssl.conf"
+apache_http_redirect_conf: "{{ apache_conf_dir }}/{{ inventory_hostname }}-redirect.conf"
+
+tasks:
+
+- name: Ensure OpenSSL and mod_ssl are installed
+  package:
+    name:
+      - openssl
+      - mod_ssl
+    state: present
+
+- name: Create SSL directory
+  file:
+    path: "{{ ssl_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Generate private key
+  command: openssl genrsa -out {{ ssl_key_path }} 2048
+  args:
+    creates: "{{ ssl_key_path }}"
+
+- name: Generate CSR
+  command: >
+    openssl req -new -key {{ ssl_key_path }}
+    -out {{ ssl_csr_path }}
+    -subj "/C={{ ssl_country }}/ST={{ ssl_state }}/L={{ ssl_city }}/O={{ ssl_org }}/OU={{ ssl_org_unit }}/CN={{ ssl_common_name }}/emailAddress={{ ssl_email }}"
+  args:
+    creates: "{{ ssl_csr_path }}"
+
+- name: Generate self-signed certificate
+  command: >
+    openssl x509 -req -in {{ ssl_csr_path }} -signkey {{ ssl_key_path }}
+    -out {{ ssl_cert_path }} -days {{ ssl_valid_days }}
+  args:
+     creates: "{{ ssl_cert_path }}"
+
+- name: Set permissions for private key and certificate
+  file:
+    path: "{{ item.path }}"
+    mode: "{{ item.mode }}"
+    owner: root
+    group: root
+  loop:
+    - { path: "{{ ssl_key_path }}", mode: '0600' }
+    - { path: "{{ ssl_cert_path }}", mode: '0644' }
+
+- name: Configure HTTP to HTTPS redirect
+  copy:
+    dest: "{{ apache_http_redirect_conf }}"
+    content: |
+      <VirtualHost *:80>
+          ServerName {{ inventory_hostname }}
+          Redirect permanent / https://{{ inventory_hostname }}/
+      </VirtualHost>
+
+- name: Ensure httpd is started and enabled
+  service:
+    name: httpd
+    state: restarted
+    enabled: yes
+
+- name: Display generated certificate
+  command: openssl x509 -in {{ ssl_cert_path }} -noout -text
+  register: cert_info
+
+- name: Show certificate details
+  debug:
+    var: cert_info.stdout
+
+
