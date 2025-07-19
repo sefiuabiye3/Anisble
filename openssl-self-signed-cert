@@ -3,13 +3,13 @@ name: Configure OpenSSL, Apache (httpd), and HTTP to HTTPS Redirect
   roles:
     - generate_ssl
 vars:
-ssl_country: "US"
-ssl_state: "MD"
-ssl_city: "Bowie"
-ssl_org: "Leidos"
+ssl_country: ""
+ssl_state: ""
+ssl_city: ""
+ssl_org: ""
 ssl_org_unit: "Linux Admin"
 ssl_common_name: "{{ inventory_hostname }}"
-ssl_email: "afolabi.mojibola@ulab.local"
+ssl_email: "@ulab.local"
 ssl_valid_days: 365
 ssl_dir: "/etc/pki/tls/custom"
 ssl_key_path: "{{ ssl_dir }}/{{ inventory_hostname }}.key"
