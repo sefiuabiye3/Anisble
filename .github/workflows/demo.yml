@@ -12,12 +12,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Checkout source code
+      # Step 1: Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Step 2: Log in to GitHub Container Registry (GHCR)
-      # This uses the built-in GITHUB_TOKEN to authenticate automatically
+      # Step 2: Log in to GitHub Container Registry
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -25,16 +24,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Step 3: Build the Docker image
-      - name: Build Docker image
+      # Step 3: Build and push Docker image
+      - name: Build and Push Docker Image
         run: |
-          docker build -t ghcr.io/${{ github.repository }}:latest .
+          # Define image name and lowercase it
+          IMAGE_ID="ghcr.io/${{ github.repository }}"
+          IMAGE_ID=$(echo "$IMAGE_ID" | tr '[:upper:]' '[:lower:]')
 
-      # Step 4 (optional): Push the image to GHCR
-      - name: Push Docker image
-        run: |
-          docker push ghcr.io/${{ github.repository }}:latest
+          # Define tags
+          TAG_LATEST="latest"
+          TAG_SHA="sha-${GITHUB_SHA::7}"  # first 7 chars of commit SHA
 
-      # Step 5 (optional): Verify the built image
+          echo "Building Docker image: $IMAGE_ID:$TAG_LATEST and $IMAGE_ID:$TAG_SHA"
+
+          # Build image
+          docker build -t $IMAGE_ID:$TAG_LATEST -t $IMAGE_ID:$TAG_SHA .
+
+          # Push both tags
+          docker push $IMAGE_ID:$TAG_LATEST
+          docker push $IMAGE_ID:$TAG_SHA
+
+      # Step 4: Verify images
       - name: List images
         run: docker images
